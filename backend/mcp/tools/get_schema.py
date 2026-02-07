@@ -2,10 +2,14 @@ import json
 from db import get_pool
 
 
-async def get_schema(table_name: str | None = None) -> str:
+async def get_schema(table_name: str | None = None, description: str = "") -> str:
     """Get database schema information.
     If no table_name is provided, returns all tables with their columns and types.
     If a table_name is provided, returns detailed column info for that specific table.
+
+    Args:
+        table_name: Optional table name to get schema for. If omitted, returns all tables.
+        description: A short Hebrew description of why this schema is being retrieved (e.g. "בדיקת מבנה טבלת הזמנות").
     """
     pool = await get_pool()
     try:

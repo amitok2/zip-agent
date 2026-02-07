@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: fashion_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fashion_pass}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql
@@ -22,9 +22,12 @@ services:
       context: ./backend
     environment:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_API_KEY}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fashion_pass}
     ports:
       - "4096:4096"
+    volumes:
+      - opencode_data:/root/.local/share/opencode
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,10 +38,11 @@ services:
     environment:
       OPENCODE_URL: http://backend:4096
     ports:
-      - "3000:3000"
+      - "3002:3000"
     depends_on:
       backend:
         condition: service_started
 
 volumes:
   postgres_data:
+  opencode_data:

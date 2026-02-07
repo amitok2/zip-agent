@@ -1,14 +1,77 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import TextareaAutosize from 'react-textarea-autosize'
-import { Send, BarChart3 } from 'lucide-react'
+import { Send, BarChart3, History } from 'lucide-react'
+import type { Message, SessionInfo, StreamPart, SSEEvent } from '@/lib/types'
+import MessageBubble from '@/components/chat/MessageBubble'
+import Sidebar from '@/components/chat/Sidebar'
 
-interface Message {
-  role: 'user' | 'assistant'
-  content: string
+function updateParts(parts: StreamPart[], event: SSEEvent): StreamPart[] {
+  if (event.type === 'part.text') {
+    const idx = parts.findIndex((p) => p.type === 'text' && p.id === event.id)
+    if (idx >= 0) {
+      const updated = [...parts]
+      updated[idx] = { type: 'text', id: event.id, text: event.text }
+      return updated
+    }
+    return [...parts, { type: 'text', id: event.id, text: event.text }]
+  }
+
+  if (event.type === 'part.reasoning') {
+    const idx = parts.findIndex((p) => p.type === 'reasoning' && p.id === event.id)
+    if (idx >= 0) {
+      const updated = [...parts]
+      updated[idx] = { type: 'reasoning', id: event.id, text: event.text }
+      return updated
+    }
+    return [...parts, { type: 'reasoning', id: event.id, text: event.text }]
+  }
+
+  if (event.type === 'part.tool') {
+    const idx = parts.findIndex((p) => p.type === 'tool' && p.id === event.id)
+    if (idx >= 0) {
+      const updated = [...parts]
+      updated[idx] = {
+        type: 'tool',
+        id: event.id,
+        tool: event.tool,
+        callID: event.callID,
+        status: event.status,
+        input: event.input,
+        output: event.output,
+        title: event.title,
+        time: event.time,
+      }
+      return updated
+    }
+    return [
+      ...parts,
+      {
+        type: 'tool',
+        id: event.id,
+        tool: event.tool,
+        callID: event.callID,
+        status: event.status,
+        input: event.input,
+        output: event.output,
+        title: event.title,
+        time: event.time,
+      },
+    ]
+  }
+
+  if (event.type === 'part.step-finish') {
+    const idx = parts.findIndex((p) => p.type === 'step-finish' && p.id === event.id)
+    if (idx >= 0) {
+      const updated = [...parts]
+      updated[idx] = { type: 'step-finish', id: event.id, cost: event.cost, tokens: event.tokens }
+      return updated
+    }
+    return [...parts, { type: 'step-finish', id: event.id, cost: event.cost, tokens: event.tokens }]
+  }
+
+  return parts
 }
 
 export default function ChatPage() {
@@ -16,58 +79,162 @@ export default function ChatPage() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [loadingSessions, setLoadingSessions] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    if (!input.trim() || isLoading) return
-    const userMessage = input.trim()
-    setInput('')
-    setIsLoading(true)
-    setMessages(prev => [...prev, { role: 'user', content: userMessage }, { role: 'assistant', content: '' }])
+  const fetchSessions = useCallback(async () => {
+    setLoadingSessions(true)
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: userMessage,
-          sessionId: sessionId,
-        })
-      })
-
-      // Read session ID from response header
-      const newSessionId = res.headers.get('X-Session-Id')
-      if (newSessionId) {
-        setSessionId(newSessionId)
+      const res = await fetch('/api/sessions')
+      if (res.ok) {
+        const data = await res.json()
+        setSessions(data)
       }
+    } catch {
+      // silently fail
+    } finally {
+      setLoadingSessions(false)
+    }
+  }, [])
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('No response body')
-      let acc = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        acc += new TextDecoder().decode(value)
-        setMessages(prev => {
+  const handleOpenSidebar = useCallback(() => {
+    setSidebarOpen(true)
+    fetchSessions()
+  }, [fetchSessions])
+
+  const handleSelectSession = useCallback(async (id: string) => {
+    setLoadingHistory(true)
+    setSidebarOpen(false)
+    try {
+      const res = await fetch(`/api/sessions/${id}/messages`)
+      if (res.ok) {
+        const data: Message[] = await res.json()
+        setMessages(data)
+        setSessionId(id)
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setLoadingHistory(false)
+    }
+  }, [])
+
+  const handleNewChat = useCallback(() => {
+    abortRef.current?.abort()
+    setMessages([])
+    setSessionId(null)
+    setIsLoading(false)
+    setSidebarOpen(false)
+  }, [])
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault()
+      if (!input.trim() || isLoading) return
+      const userMessage = input.trim()
+      setInput('')
+      setIsLoading(true)
+
+      // Abort any previous stream
+      abortRef.current?.abort()
+      const ac = new AbortController()
+      abortRef.current = ac
+
+      // Add user message + empty assistant placeholder
+      setMessages((prev) => [
+        ...prev,
+        { role: 'user', content: userMessage, parts: [] },
+        { role: 'assistant', parts: [] },
+      ])
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: userMessage, sessionId }),
+          signal: ac.signal,
+        })
+
+        const newSessionId = res.headers.get('X-Session-Id')
+        if (newSessionId) setSessionId(newSessionId)
+
+        if (!res.ok || !res.body) {
+          throw new Error(`Server error: ${res.status}`)
+        }
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            const raw = line.slice(6).trim()
+            if (!raw) continue
+
+            let event: SSEEvent
+            try {
+              event = JSON.parse(raw)
+            } catch {
+              continue
+            }
+
+            if (event.type === 'done') {
+              break
+            }
+
+            if (event.type === 'error') {
+              setMessages((prev) => {
+                const next = [...prev]
+                const last = { ...next[next.length - 1] }
+                last.error = event.type === 'error' ? event.message : 'Unknown error'
+                next[next.length - 1] = last
+                return next
+              })
+              break
+            }
+
+            // Update assistant parts
+            setMessages((prev) => {
+              const next = [...prev]
+              const last = { ...next[next.length - 1] }
+              last.parts = updateParts(last.parts, event)
+              next[next.length - 1] = last
+              return next
+            })
+          }
+        }
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return
+        setMessages((prev) => {
           const next = [...prev]
-          next[next.length - 1] = { role: 'assistant', content: acc }
+          const last = { ...next[next.length - 1] }
+          last.error = 'שגיאה בחיבור לשרת. נסה שוב.'
+          next[next.length - 1] = last
           return next
         })
+      } finally {
+        setIsLoading(false)
+        fetchSessions()
       }
-    } catch (err) {
-      setMessages(prev => {
-        const next = [...prev]
-        next[next.length - 1] = { role: 'assistant', content: 'שגיאה בחיבור לשרת. נסה שוב.' }
-        return next
-      })
-    } finally {
-      setIsLoading(false)
-    }
-  }
+    },
+    [input, isLoading, sessionId, fetchSessions],
+  )
 
   const suggestions = [
     'כמה מכירות היו היום?',
@@ -80,6 +247,26 @@ export default function ChatPage() {
 
   return (
     <div className="min-h-screen">
+      {/* History toggle button */}
+      <button
+        type="button"
+        onClick={handleOpenSidebar}
+        className="fixed top-4 right-4 z-30 p-2.5 rounded-xl bg-white/80 backdrop-blur-sm border border-slate-200 hover:bg-white hover:border-slate-300 text-slate-500 hover:text-slate-700 transition-all shadow-sm"
+        title="היסטוריית שיחות"
+      >
+        <History size={18} />
+      </button>
+
+      <Sidebar
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        sessions={sessions}
+        activeSessionId={sessionId}
+        onSelectSession={handleSelectSession}
+        onNewChat={handleNewChat}
+        loading={loadingSessions}
+      />
+
       <main className="max-w-5xl mx-auto px-6 pt-24 pb-36">
         {messages.length === 0 && (
           <div className="text-center mb-10 chat-container p-8" dir="rtl">
@@ -107,27 +294,11 @@ export default function ChatPage() {
 
         <div className="space-y-4 max-w-3xl mx-auto" dir="rtl">
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === 'user' ? 'justify-start' : 'justify-end'}`}>
-              <div className={`${m.role === 'user' ? 'message-user' : 'message-assistant text-gray-800'} rounded-2xl px-4 py-3 max-w-[85%]`}>
-                {m.role === 'assistant' ? (
-                  m.content ? (
-                    <div className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-li:my-0">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {m.content}
-                      </ReactMarkdown>
-                    </div>
-                  ) : (
-                    <div className="thinking-dots flex items-center gap-1 py-1">
-                      <span></span>
-                      <span></span>
-                      <span></span>
-                    </div>
-                  )
-                ) : (
-                  <p className="whitespace-pre-wrap text-sm text-right">{m.content}</p>
-                )}
-              </div>
-            </div>
+            <MessageBubble
+              key={i}
+              message={m}
+              isLoading={isLoading && i === messages.length - 1}
+            />
           ))}
           <div ref={messagesEndRef} />
         </div>

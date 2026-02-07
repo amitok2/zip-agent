@@ -3,10 +3,14 @@ import re
 from db import get_pool
 
 
-async def run_query(sql: str) -> str:
+async def run_query(sql: str, description: str = "") -> str:
     """Execute a read-only SQL SELECT query against the e-commerce database.
     Only SELECT statements are allowed. Results are limited to 100 rows.
     Use this tool to answer business questions by querying the PostgreSQL database.
+
+    Args:
+        sql: The SQL SELECT query to execute.
+        description: A short Hebrew description of what this query does and why (e.g. "שליפת אחוז ההחזרות לפי קטגוריה השבוע").
     """
     normalized = sql.strip()
 

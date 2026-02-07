@@ -199,41 +199,41 @@ WHERE status = 'delivered';
 INSERT INTO order_items (order_id, product_id, quantity, unit_price, size, color, discount_amount)
 SELECT
     o.id AS order_id,
-    1 + (random() * 83)::int AS product_id,
+    p.id AS product_id,
     1 + (random() * 2)::int AS quantity,
     p.price AS unit_price,
     (ARRAY['XS','S','M','L','XL','XXL'])[1 + (random() * 5)::int] AS size,
     (ARRAY['שחור','לבן','כחול','אדום','ירוק','אפור','בז''','ורוד','חום','נייבי'])[1 + (random() * 9)::int] AS color,
     CASE WHEN random() < 0.15 THEN round((random() * 30)::numeric, 2) ELSE 0 END AS discount_amount
 FROM orders o
-CROSS JOIN LATERAL (SELECT price FROM products WHERE id = 1 + (random() * 83)::int LIMIT 1) p;
+CROSS JOIN LATERAL (SELECT id, price FROM products ORDER BY random() LIMIT 1) p;
 
 -- Second item for ~70% of orders
 INSERT INTO order_items (order_id, product_id, quantity, unit_price, size, color, discount_amount)
 SELECT
     o.id AS order_id,
-    1 + (random() * 83)::int AS product_id,
+    p.id AS product_id,
     1 AS quantity,
     p.price AS unit_price,
     (ARRAY['XS','S','M','L','XL','XXL'])[1 + (random() * 5)::int] AS size,
     (ARRAY['שחור','לבן','כחול','אדום','ירוק','אפור','בז''','ורוד','חום','נייבי'])[1 + (random() * 9)::int] AS color,
     0 AS discount_amount
 FROM orders o
-CROSS JOIN LATERAL (SELECT price FROM products WHERE id = 1 + (random() * 83)::int LIMIT 1) p
+CROSS JOIN LATERAL (SELECT id, price FROM products ORDER BY random() LIMIT 1) p
 WHERE random() < 0.70;
 
 -- Third item for ~30% of orders
 INSERT INTO order_items (order_id, product_id, quantity, unit_price, size, color, discount_amount)
 SELECT
     o.id AS order_id,
-    1 + (random() * 83)::int AS product_id,
+    p.id AS product_id,
     1 AS quantity,
     p.price AS unit_price,
     (ARRAY['XS','S','M','L','XL','XXL'])[1 + (random() * 5)::int] AS size,
     (ARRAY['שחור','לבן','כחול','אדום','ירוק','אפור','בז''','ורוד','חום','נייבי'])[1 + (random() * 9)::int] AS color,
     0 AS discount_amount
 FROM orders o
-CROSS JOIN LATERAL (SELECT price FROM products WHERE id = 1 + (random() * 83)::int LIMIT 1) p
+CROSS JOIN LATERAL (SELECT id, price FROM products ORDER BY random() LIMIT 1) p
 WHERE random() < 0.30;
 
 -- Update order total_amount based on order_items

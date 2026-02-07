@@ -1,5 +1,8 @@
 import { NextRequest } from 'next/server'
-import { createSession, sendPrompt } from '@/lib/opencode'
+import { getClient } from '@/lib/opencode'
+import type { ToolStatus } from '@/lib/types'
+
+const OPENCODE_URL = process.env.OPENCODE_URL || 'http://backend:4096'
 
 export async function POST(req: NextRequest) {
   try {
@@ -9,113 +12,186 @@ export async function POST(req: NextRequest) {
       return new Response('Message is required', { status: 400 })
     }
 
+    const client = getClient()
+
     // Get or create session
     let sessionId = clientSessionId
     if (!sessionId) {
-      const session = await createSession()
+      const { data: session } = await client.session.create()
+      if (!session) {
+        return new Response('Failed to create session', { status: 500 })
+      }
       sessionId = session.id
     }
 
-    // Send prompt to OpenCode and get streaming response
-    const openCodeStream = await sendPrompt(sessionId, message)
+    const ac = new AbortController()
+    const timeout = setTimeout(() => ac.abort(), 120_000)
 
-    // Parse SSE events from OpenCode and extract text content
     const encoder = new TextEncoder()
-    const decoder = new TextDecoder()
 
-    const stream = new ReadableStream<Uint8Array>({
+    const stream = new ReadableStream({
       async start(controller) {
-        const reader = openCodeStream.getReader()
-        let buffer = ''
+        function send(data: Record<string, unknown>) {
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+          } catch {
+            // controller already closed
+          }
+        }
+
         try {
+          // 1. Subscribe to backend SSE event stream
+          const eventRes = await fetch(`${OPENCODE_URL}/event`, {
+            signal: ac.signal,
+            headers: { Accept: 'text/event-stream' },
+          })
+
+          if (!eventRes.ok || !eventRes.body) {
+            send({ type: 'error', message: 'Failed to connect to event stream' })
+            controller.close()
+            clearTimeout(timeout)
+            return
+          }
+
+          // 2. Fire prompt_async (returns 204, non-blocking)
+          fetch(`${OPENCODE_URL}/session/${sessionId}/prompt_async`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              parts: [{ type: 'text', text: message }],
+            }),
+            signal: ac.signal,
+          }).catch((err) => {
+            console.error('prompt_async error:', err)
+            send({ type: 'error', message: 'Failed to start prompt' })
+          })
+
+          // 3. Parse SSE frames from backend
+          const reader = eventRes.body.getReader()
+          const decoder = new TextDecoder()
+          let buffer = ''
+
+          // Track text parts for delta computation
+          const textAccumulator = new Map<string, string>()
+          // Track assistant message IDs — only forward parts from assistant messages
+          const assistantMsgIds = new Set<string>()
+
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
 
             buffer += decoder.decode(value, { stream: true })
-
-            // Process SSE events in the buffer
             const lines = buffer.split('\n')
-            buffer = lines.pop() || '' // Keep incomplete line in buffer
+            buffer = lines.pop() || ''
 
             for (const line of lines) {
-              const trimmed = line.trim()
+              if (!line.startsWith('data: ')) continue
+              const eventData = line.slice(6)
+              if (!eventData) continue
 
-              // Handle SSE data lines
-              if (trimmed.startsWith('data:')) {
-                const data = trimmed.slice(5).trim()
-                if (data === '[DONE]') continue
-                try {
-                  const parsed = JSON.parse(data)
-                  // Extract text content from various possible event shapes
-                  const text =
-                    parsed?.content?.text ||
-                    parsed?.text ||
-                    parsed?.delta?.text ||
-                    parsed?.choices?.[0]?.delta?.content ||
-                    ''
-                  if (text) {
-                    controller.enqueue(encoder.encode(text))
+              try {
+                const payload = JSON.parse(eventData)
+                const eventType = payload.type as string
+
+                // Filter events for our session
+                const evtSessionId = payload.properties?.sessionID || payload.properties?.part?.sessionID || payload.properties?.info?.sessionID
+                if (evtSessionId && evtSessionId !== sessionId) continue
+
+                // Track assistant message IDs from message.updated events
+                if (eventType === 'message.updated') {
+                  const info = payload.properties?.info
+                  if (info?.role === 'assistant' && info?.id) {
+                    assistantMsgIds.add(info.id)
                   }
-                } catch {
-                  // If not JSON, treat as plain text
-                  if (data && data !== '[DONE]') {
-                    controller.enqueue(encoder.encode(data))
-                  }
+                  continue
                 }
-              }
-              // Handle plain text (non-SSE response)
-              else if (trimmed && !trimmed.startsWith(':') && !trimmed.startsWith('event:') && !trimmed.startsWith('id:')) {
-                // Try parsing as JSON first
-                try {
-                  const parsed = JSON.parse(trimmed)
-                  const text =
-                    parsed?.content?.text ||
-                    parsed?.text ||
-                    parsed?.delta?.text ||
-                    ''
-                  if (text) {
-                    controller.enqueue(encoder.encode(text))
+
+                if (eventType === 'message.part.updated') {
+                  const part = payload.properties?.part
+                  if (!part) continue
+
+                  // Skip parts from non-assistant messages (e.g. user echo)
+                  if (part.messageID && !assistantMsgIds.has(part.messageID)) continue
+
+                  const partType = part.type as string
+                  const partId = part.id || `${partType}-${Date.now()}`
+
+                  if (partType === 'text') {
+                    const fullText = (part.text || '') as string
+                    const prev = textAccumulator.get(partId) || ''
+                    const delta = fullText.slice(prev.length)
+                    textAccumulator.set(partId, fullText)
+                    if (delta) {
+                      send({ type: 'part.text', id: partId, delta, text: fullText })
+                    }
+                  } else if (partType === 'reasoning') {
+                    const fullText = (part.text || '') as string
+                    const prev = textAccumulator.get(partId) || ''
+                    const delta = fullText.slice(prev.length)
+                    textAccumulator.set(partId, fullText)
+                    if (delta) {
+                      send({ type: 'part.reasoning', id: partId, delta, text: fullText })
+                    }
+                  } else if (partType === 'tool') {
+                    // Tool data is nested under part.state
+                    const state = part.state || {}
+                    send({
+                      type: 'part.tool',
+                      id: partId,
+                      tool: part.tool || '',
+                      callID: part.callID || part.id || '',
+                      status: (state.status || 'running') as ToolStatus,
+                      input: state.input || {},
+                      output: state.output,
+                      title: state.title,
+                      time: state.time,
+                    })
+                  } else if (partType === 'step-finish') {
+                    send({
+                      type: 'part.step-finish',
+                      id: partId,
+                      cost: part.cost || 0,
+                      tokens: part.tokens || { input: 0, output: 0, reasoning: 0 },
+                    })
                   }
-                } catch {
-                  // Plain text fallback
-                  controller.enqueue(encoder.encode(trimmed))
+                  // skip step-start and other unknown types
+                } else if (eventType === 'session.idle') {
+                  send({ type: 'done' })
+                  reader.cancel()
+                  break
+                } else if (eventType === 'session.error') {
+                  send({
+                    type: 'error',
+                    message: payload.properties?.error || 'Session error',
+                  })
+                  reader.cancel()
+                  break
                 }
+              } catch {
+                // Skip unparseable frames
               }
             }
           }
-
-          // Process any remaining buffer
-          if (buffer.trim()) {
-            try {
-              const parsed = JSON.parse(buffer.trim())
-              const text = parsed?.content?.text || parsed?.text || ''
-              if (text) {
-                controller.enqueue(encoder.encode(text))
-              }
-            } catch {
-              if (buffer.trim() && !buffer.trim().startsWith(':')) {
-                controller.enqueue(encoder.encode(buffer.trim()))
-              }
-            }
-          }
-
-          controller.close()
         } catch (err) {
-          console.error('Stream processing error:', err)
-          controller.error(err)
+          if ((err as Error).name !== 'AbortError') {
+            console.error('SSE stream error:', err)
+            send({ type: 'error', message: (err as Error).message || 'Stream error' })
+          }
+        } finally {
+          clearTimeout(timeout)
+          try { controller.close() } catch { /* already closed */ }
         }
-      }
+      },
     })
 
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Transfer-Encoding': 'chunked',
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
         'X-Session-Id': sessionId,
-      }
+      },
     })
-
   } catch (err) {
     const e = err as { message?: string }
     console.error('Chat error:', e)

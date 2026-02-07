@@ -2,11 +2,16 @@ import json
 from db import get_pool
 
 
-async def search_data(query: str, entity: str = "products") -> str:
+async def search_data(query: str, entity: str = "products", description: str = "") -> str:
     """Full-text search across products or customers.
     entity: 'products' searches by name, description, and tags.
     entity: 'customers' searches by name, email, and city.
     Returns up to 20 matching results.
+
+    Args:
+        query: The search term to look for.
+        entity: Either 'products' or 'customers'.
+        description: A short Hebrew description of what is being searched and why (e.g. "חיפוש מוצרי עור במלאי").
     """
     pool = await get_pool()
     try:

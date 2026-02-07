@@ -2,11 +2,15 @@ import json
 from db import get_pool
 
 
-async def get_kpi_summary(period: str = "today") -> str:
+async def get_kpi_summary(period: str = "today", description: str = "") -> str:
     """Get key business metrics for a time period.
     period: 'today', 'this_week', 'this_month', 'this_year'.
     Returns: total_orders, total_revenue, avg_order_value, orders_by_status,
     top_5_categories, top_5_products, return_rate, new_customers_count.
+
+    Args:
+        period: Time period - 'today', 'this_week', 'this_month', or 'this_year'.
+        description: A short Hebrew description of why these KPIs are being fetched (e.g. "סיכום מדדי מכירות השבוע").
     """
     period_filter = {
         "today": "order_date >= CURRENT_DATE",
