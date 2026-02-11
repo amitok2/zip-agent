@@ -11,14 +11,18 @@ out/
 build/
 .next/standalone/
 
-# env files
+# env files — NEVER commit real secrets
 .env
+.env.local
+.env.production
+.env.staging
 .env*.local
-video/
 
 # misc
 .DS_Store
 *.pem
+*.key
+video/
 
 # debug
 npm-debug.log*
@@ -31,7 +35,15 @@ next-env.d.ts
 
 # docker
 postgres_data/
+opencode_data/
 
 # IDE
 .vscode/
 .idea/
+
+# Claude Code agents/skills (local config)
+.agents/
+
+# OpenCode local data
+.opencode/sessions/
+.opencode/history/
