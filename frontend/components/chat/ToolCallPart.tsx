@@ -43,6 +43,18 @@ function tryParseOutput(output?: string): unknown {
   }
 }
 
+/** Check if tool output contains an error despite "completed" status */
+function hasErrorInOutput(output?: string): boolean {
+  if (!output) return false
+  try {
+    const parsed = JSON.parse(output)
+    if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) return true
+  } catch {
+    // not JSON — check for common error patterns in plain text
+  }
+  return false
+}
+
 function OutputPreview({ output }: { output?: string }) {
   const parsed = tryParseOutput(output)
   if (!parsed) return <p className="text-[11px] text-slate-400">אין תוצאות</p>
@@ -219,7 +231,7 @@ export default function ToolCallPart({ tool, status, input, output, title, time 
   const Icon = meta.icon
   const duration = formatDuration(time)
   const isActive = status === 'pending' || status === 'running'
-  const isError = status === 'error'
+  const isError = status === 'error' || (status === 'completed' && hasErrorInOutput(output))
 
   // Extract description from input (set by LLM) or fall back to title from OpenCode
   const description = (input.description as string) || title || ''
@@ -232,8 +244,8 @@ export default function ToolCallPart({ tool, status, input, output, title, time 
       {/* Single-line header */}
       <button
         type="button"
-        onClick={() => { if (status === 'completed' && output) setExpanded(!expanded) }}
-        className={`flex items-center gap-2 w-full text-right ${status === 'completed' && output ? 'cursor-pointer' : 'cursor-default'}`}
+        onClick={() => { if (!isActive && !isError && output) setExpanded(!expanded) }}
+        className={`flex items-center gap-2 w-full text-right ${!isActive && !isError && output ? 'cursor-pointer' : 'cursor-default'}`}
       >
         {isActive ? (
           <Loader2 size={13} className="animate-spin text-slate-400 shrink-0" />
@@ -257,7 +269,7 @@ export default function ToolCallPart({ tool, status, input, output, title, time 
           <span className="text-[10px] text-slate-400 tabular-nums" dir="ltr">{duration}</span>
         ) : null}
 
-        {status === 'completed' && output ? (
+        {!isActive && !isError && output ? (
           <ChevronDown
             size={12}
             className={`text-slate-300 transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
@@ -290,11 +302,19 @@ export default function ToolCallPart({ tool, status, input, output, title, time 
 
       {/* Error message */}
       {isError && output ? (
-        <p className="text-[11px] text-red-400 mt-1">{output}</p>
+        <p className="text-[11px] text-red-400 mt-1" dir="ltr">
+          {(() => {
+            try {
+              const parsed = JSON.parse(output)
+              if (typeof parsed === 'object' && parsed !== null && parsed.error) return String(parsed.error)
+            } catch { /* not JSON */ }
+            return output
+          })()}
+        </p>
       ) : null}
 
       {/* Expanded output */}
-      {expanded && status === 'completed' ? (
+      {expanded && !isError ? (
         <div className="tool-card-output mt-2 pt-2 border-t border-slate-100">
           <OutputPreview output={output} />
         </div>

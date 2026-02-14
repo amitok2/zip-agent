@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     }
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), 120_000)
+    const timeout = setTimeout(() => ac.abort(), 600_000) // 10 minutes
 
     const encoder = new TextEncoder()
 
@@ -39,6 +39,15 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        // Send keep-alive every 30s to prevent proxy/infra timeouts
+        const keepAlive = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(': keep-alive\n\n'))
+          } catch {
+            clearInterval(keepAlive)
+          }
+        }, 30_000)
+
         try {
           // 1. Subscribe to backend SSE event stream
           const eventRes = await fetch(`${OPENCODE_URL}/event`, {
@@ -50,6 +59,7 @@ export async function POST(req: NextRequest) {
             send({ type: 'error', message: 'Failed to connect to event stream' })
             controller.close()
             clearTimeout(timeout)
+            clearInterval(keepAlive)
             return
           }
 
@@ -173,12 +183,16 @@ export async function POST(req: NextRequest) {
             }
           }
         } catch (err) {
-          if ((err as Error).name !== 'AbortError') {
+          if ((err as Error).name === 'AbortError') {
+            // Timeout fired — notify the frontend so it can show a proper message
+            send({ type: 'error', message: 'הפעולה ארכה זמן רב מדי. נסה שוב או פשט את השאלה.' })
+          } else {
             console.error('SSE stream error:', err)
             send({ type: 'error', message: (err as Error).message || 'Stream error' })
           }
         } finally {
           clearTimeout(timeout)
+          clearInterval(keepAlive)
           try { controller.close() } catch { /* already closed */ }
         }
       },

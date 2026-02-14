@@ -225,10 +225,33 @@ export default function ChatPage() {
           const next = [...prev]
           const last = { ...next[next.length - 1] }
           last.error = 'שגיאה בחיבור לשרת. נסה שוב.'
+          // Mark any "running" tool calls as errored so they don't stay stuck
+          last.parts = last.parts.map((p) =>
+            p.type === 'tool' && p.status === 'running'
+              ? { ...p, status: 'error' as const }
+              : p,
+          )
           next[next.length - 1] = last
           return next
         })
       } finally {
+        // Mark any tool calls still showing as "running" to "completed"
+        // This handles cases where the stream ended without proper completion signals
+        setMessages((prev) => {
+          const next = [...prev]
+          const last = { ...next[next.length - 1] }
+          const hasStuckTools = last.parts.some((p) => p.type === 'tool' && p.status === 'running')
+          if (hasStuckTools) {
+            last.parts = last.parts.map((p) =>
+              p.type === 'tool' && p.status === 'running'
+                ? { ...p, status: 'completed' as const }
+                : p,
+            )
+            next[next.length - 1] = last
+            return next
+          }
+          return prev
+        })
         setIsLoading(false)
         fetchSessions()
       }
